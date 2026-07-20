@@ -33,37 +33,58 @@ try {
 const TOOLS_DEFINITION = [
   {
     name: "consultar_producto",
-    description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
+    description: "Busca productos en la planilla. Pásale palabras clave principales, marca o SKU.",
     inputSchema: {
       type: "object",
       properties: {
-        busqueda: { type: "string", description: "Nombre, SKU o código de barras del producto" }
+        busqueda: { type: "string", description: "Palabras clave del producto (ej: 'hipoglos', 'ibupirac', '38801')" }
       },
       required: ["busqueda"]
     }
   }
 ];
 
-// Búsqueda en planilla
+// Función para normalizar texto (quita tildes y caracteres especiales)
+function normalizar(texto) {
+  return (texto || '')
+    .toString()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Quita tildes
+    .replace(/[^a-z0-9\s]/g, "");   // Quita puntos, comas, etc.
+}
+
+// Búsqueda inteligente y dinámica
 async function buscarProducto(query) {
   if (!doc) return [];
   await doc.loadInfo();
   const sheet = doc.sheetsByIndex[0];
   const rows = await sheet.getRows();
-  const q = (query || '').toLowerCase();
+  
+  const qNormalizado = normalizar(query);
+  const palabrasBusqueda = qNormalizado.split(/\s+/).filter(p => p.length > 1);
+  
+  if (palabrasBusqueda.length === 0) return [];
 
   return rows.filter(row => {
-    const descrip = (row.get('descrip') || '').toLowerCase();
-    const sku = (row.get('sku') || '').toString().toLowerCase();
-    const barras = (row.get('barras') || '').toString().toLowerCase();
-    return descrip.includes(q) || sku.includes(q) || barras.includes(q);
+    const descrip = normalizar(row.get('descrip'));
+    const sku = normalizar(row.get('sku'));
+    const barras = normalizar(row.get('barras'));
+
+    // 1. Si coincide el SKU o Código de Barras
+    if (sku.includes(qNormalizado) || barras.includes(qNormalizado)) {
+      return true;
+    }
+
+    // 2. Coincidencia dinámica: si al menos una de las palabras principales está en la descripción
+    return palabrasBusqueda.some(palabra => descrip.includes(palabra));
   }).map(row => ({
     sku: row.get('sku'),
     barras: row.get('barras'),
     descripcion: row.get('descrip'),
     precio: row.get('precio'),
     stock: row.get('stock')
-  })).slice(0, 5);
+  })).slice(0, 5); // Devuelve hasta 5 opciones para que la IA elija la mejor
 }
 
 // Handler universal que responde a SSE y HTTP
@@ -73,7 +94,6 @@ const handleRequest = async (req, res) => {
     console.log(`[BODY RECIBIDO]`, JSON.stringify(req.body));
   }
 
-  // Responder preflight OPTIONS de inmediato
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -82,7 +102,6 @@ const handleRequest = async (req, res) => {
   const method = body.method;
   const id = body.id !== undefined ? body.id : 1;
 
-  // 1. Ejecución de herramienta
   if (method === "tools/call") {
     try {
       const busqueda = body.params?.arguments?.busqueda || "";
@@ -103,7 +122,6 @@ const handleRequest = async (req, res) => {
     }
   }
 
-  // 2. Respuesta estándar de descubrimiento de herramientas (para initialize, tools/list, etc.)
   return res.json({
     jsonrpc: "2.0",
     id,
@@ -116,7 +134,6 @@ const handleRequest = async (req, res) => {
   });
 };
 
-// Capturar TODAS las rutas posibles
 app.use("*", handleRequest);
 
 app.listen(PORT, () => console.log(`Servidor MCP listo en puerto ${PORT}`));
