@@ -70,17 +70,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Endpoint SSE para Botmaker
+// Endpoint SSE mejorado para Handshake de MCP
 let transport;
+
 app.get("/sse", async (req, res) => {
+  // Configurar headers para mantener la conexión SSE abierta
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
   transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
 });
 
-app.post("/messages", async (req, res) => {
+app.post("/messages", express.json(), async (req, res) => {
   if (transport) {
     await transport.handlePostMessage(req, res);
+  } else {
+    res.status(400).send("Transport no iniciado");
   }
 });
+
+// Endpoint de prueba rápida para evitar que Render se duerma
+app.get("/", (req, res) => res.send("Servidor MCP Farmacia Activo"));
 
 app.listen(PORT, () => console.log(`Servidor MCP corriendo en puerto ${PORT}`));
