@@ -49,7 +49,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const query = (request.params.arguments?.busqueda || '').toLowerCase();
     
     if (!doc) {
-      return { content: [{ type: "text", text: "Error: No se pudo conectar con la base de datos." }] };
+      return { content: [{ type: "text", text: "Error: No hay conexión con la base de datos." }] };
     }
 
     await doc.loadInfo();
@@ -75,18 +75,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Mapa de transportes activos por sesión
+// Almacenamiento de sesiones SSE activas
 const transports = new Map();
 
-// Endpoint SSE obligatorio para la conexión con Botmaker
+// Endpoint SSE principal para Botmaker
 app.get("/sse", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Content-Type", "text/event-stream");
 
   const transport = new SSEServerTransport("/messages", res);
-  const sessionId = Math.random().toString(36).substring(2);
+  const sessionId = transport.sessionId;
   transports.set(sessionId, transport);
 
   req.on("close", () => {
@@ -96,21 +95,26 @@ app.get("/sse", async (req, res) => {
   await server.connect(transport);
 });
 
-// Endpoint para recibir los mensajes POST de la sesión
+// Endpoint POST para mensajes vinculados a la sesión
 app.post("/messages", express.json(), async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   
-  // Asignar al transporte activo más reciente
-  const activeTransport = Array.from(transports.values()).pop();
-  
-  if (activeTransport) {
-    await activeTransport.handlePostMessage(req, res);
+  const sessionId = req.query.sessionId;
+  let transport = transports.get(sessionId);
+
+  // Fallback de respaldo por si no viene el ID en la Query
+  if (!transport && transports.size > 0) {
+    transport = Array.from(transports.values())[transports.size - 1];
+  }
+
+  if (transport) {
+    await transport.handlePostMessage(req, res);
   } else {
-    res.status(400).json({ error: "No hay sesión SSE activa" });
+    res.status(400).send("Sesión no encontrada");
   }
 });
 
-// Endpoint de verificación de salud (Health Check)
+// Endpoint de prueba rápida
 app.get("/", (req, res) => res.send("OK"));
 
-app.listen(PORT, () => console.log(`Servidor MCP activo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
