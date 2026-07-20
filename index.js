@@ -1,14 +1,13 @@
 import express from "express";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 
 const app = express();
+app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
-// Configuración de Google Sheets
+// Autenticación con Google Sheets
 let doc;
 try {
   const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -22,15 +21,9 @@ try {
   console.error("Error al cargar credenciales:", e);
 }
 
-// Crear servidor MCP
-const server = new Server(
-  { name: "mcp-sheets-farmacia", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
-
-// Definir herramientas para Botmaker
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [{
+// Definición de las herramientas
+const TOOLS_DEFINITION = [
+  {
     name: "consultar_producto",
     description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
     inputSchema: {
@@ -40,58 +33,84 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
       required: ["busqueda"]
     }
-  }]
-}));
-
-// Lógica de búsqueda en tiempo real
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "consultar_producto") {
-    const query = (request.params.arguments.busqueda || '').toLowerCase();
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
-    const rows = await sheet.getRows();
-
-    const resultados = rows.filter(row => {
-      const descrip = (row.get('descrip') || '').toLowerCase();
-      const sku = (row.get('sku') || '').toString().toLowerCase();
-      const barras = (row.get('barras') || '').toString().toLowerCase();
-      return descrip.includes(query) || sku.includes(query) || barras.includes(query);
-    }).map(row => ({
-      sku: row.get('sku'),
-      barras: row.get('barras'),
-      descripcion: row.get('descrip'),
-      precio: row.get('precio'),
-      stock: row.get('stock')
-    }));
-
-    return {
-      content: [{ type: "text", text: JSON.stringify(resultados.slice(0, 5)) }]
-    };
   }
+];
+
+// Función de búsqueda
+async function buscarEnSheets(query) {
+  await doc.loadInfo();
+  const sheet = doc.sheetsByIndex[0];
+  const rows = await sheet.getRows();
+  const q = (query || '').toLowerCase();
+
+  const resultados = rows.filter(row => {
+    const descrip = (row.get('descrip') || '').toLowerCase();
+    const sku = (row.get('sku') || '').toString().toLowerCase();
+    const barras = (row.get('barras') || '').toString().toLowerCase();
+    return descrip.includes(q) || sku.includes(q) || barras.includes(q);
+  }).map(row => ({
+    sku: row.get('sku'),
+    barras: row.get('barras'),
+    descripcion: row.get('descrip'),
+    precio: row.get('precio'),
+    stock: row.get('stock')
+  }));
+
+  return resultados.slice(0, 5);
+}
+
+// Endpoint compatible con el descubrimiento de Botmaker (GET)
+app.get(["/", "/sse", "/mcp"], (req, res) => {
+  res.json({
+    jsonrpc: "2.0",
+    result: {
+      tools: TOOLS_DEFINITION
+    }
+  });
 });
 
-// Endpoint SSE mejorado para Handshake de MCP
-let transport;
+// Endpoint compatible con ejecución de MCP (POST)
+app.post(["/", "/sse", "/messages", "/mcp"], async (req, res) => {
+  const { method, params, id } = req.body || {};
 
-app.get("/sse", async (req, res) => {
-  // Configurar headers para mantener la conexión SSE abierta
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  transport = new SSEServerTransport("/messages", res);
-  await server.connect(transport);
-});
-
-app.post("/messages", express.json(), async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send("Transport no iniciado");
+  if (method === "tools/list") {
+    return res.json({
+      jsonrpc: "2.0",
+      id: id || 1,
+      result: { tools: TOOLS_DEFINITION }
+    });
   }
+
+  if (method === "tools/call") {
+    try {
+      const busqueda = params?.arguments?.busqueda || "";
+      const datos = await buscarEnSheets(busqueda);
+      return res.json({
+        jsonrpc: "2.0",
+        id: id || 1,
+        result: {
+          content: [{ type: "text", text: JSON.stringify(datos) }]
+        }
+      });
+    } catch (err) {
+      return res.json({
+        jsonrpc: "2.0",
+        id: id || 1,
+        error: { code: -32603, message: err.message }
+      });
+    }
+  }
+
+  // Respuesta por defecto para Handshake/Init
+  res.json({
+    jsonrpc: "2.0",
+    id: id || 1,
+    result: {
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      serverInfo: { name: "mcp-sheets-farmacia", version: "1.0.0" }
+    }
+  });
 });
 
-// Endpoint de prueba rápida para evitar que Render se duerma
-app.get("/", (req, res) => res.send("Servidor MCP Farmacia Activo"));
-
-app.listen(PORT, () => console.log(`Servidor MCP corriendo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor MCP listo en puerto ${PORT}`));
