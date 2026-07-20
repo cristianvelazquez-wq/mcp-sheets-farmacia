@@ -1,11 +1,10 @@
 import express from "express";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 
 const app = express();
+app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
 // Configuración de Google Sheets
@@ -22,81 +21,96 @@ try {
   console.error("Error cargando credenciales:", e);
 }
 
-// Crear servidor MCP
-const server = new Server(
-  { name: "mcp-sheets-farmacia", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
-
-// Registrar Herramientas para Botmaker
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [{
-    name: "consultar_producto",
-    description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        busqueda: { type: "string", description: "Nombre, SKU o código de barras del producto" }
-      },
-      required: ["busqueda"]
+// Estructura de la herramienta que busca Botmaker
+const TOOL_MANIFEST = {
+  tools: [
+    {
+      name: "consultar_producto",
+      description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          busqueda: { type: "string", description: "Nombre, SKU o código de barras del producto" }
+        },
+        required: ["busqueda"]
+      }
     }
-  }]
-}));
+  ]
+};
 
-// Registrar la ejecución de la consulta
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "consultar_producto") {
-    const query = (request.params.arguments?.busqueda || '').toLowerCase();
-    
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
-    const rows = await sheet.getRows();
+// Función de búsqueda en Google Sheets
+async function ejecutarBusqueda(query) {
+  if (!doc) return [];
+  await doc.loadInfo();
+  const sheet = doc.sheetsByIndex[0];
+  const rows = await sheet.getRows();
+  const q = (query || '').toLowerCase();
 
-    const resultados = rows.filter(row => {
-      const descrip = (row.get('descrip') || '').toLowerCase();
-      const sku = (row.get('sku') || '').toString().toLowerCase();
-      const barras = (row.get('barras') || '').toString().toLowerCase();
-      return descrip.includes(query) || sku.includes(query) || barras.includes(query);
-    }).map(row => ({
-      sku: row.get('sku'),
-      barras: row.get('barras'),
-      descripcion: row.get('descrip'),
-      precio: row.get('precio'),
-      stock: row.get('stock')
-    }));
+  return rows.filter(row => {
+    const descrip = (row.get('descrip') || '').toLowerCase();
+    const sku = (row.get('sku') || '').toString().toLowerCase();
+    const barras = (row.get('barras') || '').toString().toLowerCase();
+    return descrip.includes(q) || sku.includes(q) || barras.includes(q);
+  }).map(row => ({
+    sku: row.get('sku'),
+    barras: row.get('barras'),
+    descripcion: row.get('descrip'),
+    precio: row.get('precio'),
+    stock: row.get('stock')
+  })).slice(0, 5);
+}
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(resultados.slice(0, 5)) }]
-    };
-  }
-});
-
-// Manejo de conexiones SSE (Requerido por Botmaker)
-const transports = new Map();
-
-app.get("/sse", async (req, res) => {
+// 1. Respuesta inmediata para cuando Botmaker descubre las herramientas
+app.get("*", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const transport = new SSEServerTransport("/messages", res);
-  
-  const sessionId = Math.random().toString(36).substring(2);
-  transports.set(sessionId, transport);
-
-  req.on("close", () => {
-    transports.delete(sessionId);
+  res.json({
+    jsonrpc: "2.0",
+    result: TOOL_MANIFEST
   });
-
-  await server.connect(transport);
 });
 
-app.post("/messages", express.json(), async (req, res) => {
+// 2. Respuesta para cuando el Agente ejecuta la búsqueda
+app.post("*", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  // Tomar el transporte activo
-  const transport = Array.from(transports.values())[0];
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send("No hay conexión SSE activa");
+  const body = req.body || {};
+  const id = body.id || 1;
+
+  // Si Botmaker pide lista de herramientas vía POST
+  if (body.method === "tools/list") {
+    return res.json({
+      jsonrpc: "2.0",
+      id,
+      result: TOOL_MANIFEST
+    });
   }
+
+  // Si Botmaker llama a la herramienta
+  if (body.method === "tools/call" || body.params?.name === "consultar_producto") {
+    try {
+      const busqueda = body.params?.arguments?.busqueda || body.busqueda || "";
+      const resultados = await ejecutarBusqueda(busqueda);
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{ type: "text", text: JSON.stringify(resultados) }]
+        }
+      });
+    } catch (err) {
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32603, message: err.message }
+      });
+    }
+  }
+
+  // Respuesta por defecto
+  res.json({
+    jsonrpc: "2.0",
+    id,
+    result: TOOL_MANIFEST
+  });
 });
 
-app.listen(PORT, () => console.log(`Servidor MCP activo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
