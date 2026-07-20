@@ -7,7 +7,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Autenticación con Google Sheets
+// Configuración de Google Sheets
 let doc;
 try {
   const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -18,32 +18,31 @@ try {
   });
   doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
 } catch (e) {
-  console.error("Error al cargar credenciales:", e);
+  console.error("Error cargando credenciales de Google Sheets:", e);
 }
 
-// Definición de las herramientas
-const TOOLS_DEFINITION = [
-  {
-    name: "consultar_producto",
-    description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        busqueda: { type: "string", description: "Nombre, SKU o código de barras del producto" }
-      },
-      required: ["busqueda"]
-    }
+// Estructura de la herramienta MCP
+const TOOL_DEF = {
+  name: "consultar_producto",
+  description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      busqueda: { type: "string", description: "Nombre, SKU o código de barras del producto" }
+    },
+    required: ["busqueda"]
   }
-];
+};
 
-// Función de búsqueda
-async function buscarEnSheets(query) {
+// Función para buscar datos en la planilla
+async function buscarProducto(query) {
+  if (!doc) return [];
   await doc.loadInfo();
   const sheet = doc.sheetsByIndex[0];
   const rows = await sheet.getRows();
   const q = (query || '').toLowerCase();
 
-  const resultados = rows.filter(row => {
+  return rows.filter(row => {
     const descrip = (row.get('descrip') || '').toLowerCase();
     const sku = (row.get('sku') || '').toString().toLowerCase();
     const barras = (row.get('barras') || '').toString().toLowerCase();
@@ -54,63 +53,49 @@ async function buscarEnSheets(query) {
     descripcion: row.get('descrip'),
     precio: row.get('precio'),
     stock: row.get('stock')
-  }));
-
-  return resultados.slice(0, 5);
+  })).slice(0, 5);
 }
 
-// Endpoint compatible con el descubrimiento de Botmaker (GET)
-app.get(["/", "/sse", "/mcp"], (req, res) => {
-  res.json({
-    jsonrpc: "2.0",
-    result: {
-      tools: TOOLS_DEFINITION
-    }
-  });
-});
+// Controlador unificado para GET y POST en cualquier ruta (/sse, /, /mcp)
+const handleMCP = async (req, res) => {
+  const body = req.body || {};
+  const method = body.method;
+  const id = body.id || 1;
 
-// Endpoint compatible con ejecución de MCP (POST)
-app.post(["/", "/sse", "/messages", "/mcp"], async (req, res) => {
-  const { method, params, id } = req.body || {};
-
-  if (method === "tools/list") {
-    return res.json({
-      jsonrpc: "2.0",
-      id: id || 1,
-      result: { tools: TOOLS_DEFINITION }
-    });
-  }
-
+  // 1. Invocación de herramienta
   if (method === "tools/call") {
     try {
-      const busqueda = params?.arguments?.busqueda || "";
-      const datos = await buscarEnSheets(busqueda);
+      const busqueda = body.params?.arguments?.busqueda || "";
+      const resultados = await buscarProducto(busqueda);
       return res.json({
         jsonrpc: "2.0",
-        id: id || 1,
+        id,
         result: {
-          content: [{ type: "text", text: JSON.stringify(datos) }]
+          content: [{ type: "text", text: JSON.stringify(resultados) }]
         }
       });
     } catch (err) {
       return res.json({
         jsonrpc: "2.0",
-        id: id || 1,
+        id,
         error: { code: -32603, message: err.message }
       });
     }
   }
 
-  // Respuesta por defecto para Handshake/Init
-  res.json({
+  // 2. Para cualquier otra consulta (tools/list, initialize, GET de prueba, etc.)
+  return res.json({
     jsonrpc: "2.0",
-    id: id || 1,
+    id,
     result: {
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
+      tools: [TOOL_DEF],
       serverInfo: { name: "mcp-sheets-farmacia", version: "1.0.0" }
     }
   });
-});
+};
 
-app.listen(PORT, () => console.log(`Servidor MCP listo en puerto ${PORT}`));
+app.all("*", handleMCP);
+
+app.listen(PORT, () => console.log(`Servidor MCP escuchando en el puerto ${PORT}`));
