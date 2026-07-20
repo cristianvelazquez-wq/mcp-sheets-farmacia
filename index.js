@@ -5,7 +5,6 @@ import { JWT } from "google-auth-library";
 
 const app = express();
 
-// Habilitar CORS total para que Botmaker/Navegador no bloquee la conexión
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
@@ -70,6 +69,9 @@ async function buscarProducto(query) {
 // Handler universal que responde a SSE y HTTP
 const handleRequest = async (req, res) => {
   console.log(`[PETICIÓN RECIBIDA] ${req.method} en ${req.url}`);
+  if (req.body) {
+    console.log(`[BODY RECIBIDO]`, JSON.stringify(req.body));
+  }
 
   // Responder preflight OPTIONS de inmediato
   if (req.method === "OPTIONS") {
@@ -78,7 +80,7 @@ const handleRequest = async (req, res) => {
 
   const body = req.body || {};
   const method = body.method;
-  const id = body.id || 1;
+  const id = body.id !== undefined ? body.id : 1;
 
   // 1. Ejecución de herramienta
   if (method === "tools/call") {
@@ -101,7 +103,7 @@ const handleRequest = async (req, res) => {
     }
   }
 
-  // 2. Respuesta estándar de descubrimiento de herramientas
+  // 2. Respuesta estándar de descubrimiento de herramientas (para initialize, tools/list, etc.)
   return res.json({
     jsonrpc: "2.0",
     id,
