@@ -9,14 +9,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuración de Google Sheets
-const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-const serviceAccountAuth = new JWT({
-  email: creds.client_email,
-  key: creds.private_key,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-});
-
-const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
+let doc;
+try {
+  const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const serviceAccountAuth = new JWT({
+    email: creds.client_email,
+    key: creds.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  });
+  doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID, serviceAccountAuth);
+} catch (e) {
+  console.error("Error al cargar credenciales:", e);
+}
 
 // Crear servidor MCP
 const server = new Server(
@@ -42,7 +46,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 // Lógica de búsqueda en tiempo real
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "consultar_producto") {
-    const query = request.params.arguments.busqueda.toLowerCase();
+    const query = (request.params.arguments.busqueda || '').toLowerCase();
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[0];
     const rows = await sheet.getRows();
