@@ -1,8 +1,17 @@
 import express from "express";
+import cors from "cors";
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 
 const app = express();
+
+// Habilitar CORS total para que Botmaker/Navegador no bloquee la conexión
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "mcp-version"]
+}));
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -36,7 +45,7 @@ const TOOLS_DEFINITION = [
   }
 ];
 
-// Función para consultar productos en la planilla
+// Búsqueda en planilla
 async function buscarProducto(query) {
   if (!doc) return [];
   await doc.loadInfo();
@@ -58,22 +67,20 @@ async function buscarProducto(query) {
   })).slice(0, 5);
 }
 
-// CORS Middleware para permitir conexiones desde Botmaker
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
+// Handler universal que responde a SSE y HTTP
+const handleRequest = async (req, res) => {
+  console.log(`[PETICIÓN RECIBIDA] ${req.method} en ${req.url}`);
 
-// Manejo unificado de peticiones MCP (Handshake, List Tools y Call Tool)
-const responderMCP = async (req, res) => {
+  // Responder preflight OPTIONS de inmediato
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   const body = req.body || {};
   const method = body.method;
   const id = body.id || 1;
 
-  // 1. Ejecución de la herramienta
+  // 1. Ejecución de herramienta
   if (method === "tools/call") {
     try {
       const busqueda = body.params?.arguments?.busqueda || "";
@@ -94,7 +101,7 @@ const responderMCP = async (req, res) => {
     }
   }
 
-  // 2. Handshake / Descubrimiento de Herramientas
+  // 2. Respuesta estándar de descubrimiento de herramientas
   return res.json({
     jsonrpc: "2.0",
     id,
@@ -107,7 +114,7 @@ const responderMCP = async (req, res) => {
   });
 };
 
-// Rutas compatibles con cualquier endpoint que consulte Botmaker
-app.all(["/", "/sse", "/messages", "/mcp"], responderMCP);
+// Capturar TODAS las rutas posibles
+app.use("*", handleRequest);
 
 app.listen(PORT, () => console.log(`Servidor MCP listo en puerto ${PORT}`));
