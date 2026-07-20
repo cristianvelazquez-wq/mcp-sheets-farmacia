@@ -1,11 +1,10 @@
 import express from "express";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { GoogleSpreadsheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
 
 const app = express();
+app.use(express.json());
+
 const PORT = process.env.PORT || 3000;
 
 // Configuración de Google Sheets
@@ -22,15 +21,9 @@ try {
   console.error("Error al cargar credenciales de Google Sheets:", e);
 }
 
-// Inicialización del Servidor MCP
-const server = new Server(
-  { name: "mcp-sheets-farmacia", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
-
-// Declaración de Herramientas (Tools)
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [{
+// Estructura de herramientas para el protocolo MCP
+const TOOLS_DEFINITION = [
+  {
     name: "consultar_producto",
     description: "Busca productos en la farmacia por nombre, descripción, SKU o código de barras en tiempo real.",
     inputSchema: {
@@ -40,81 +33,81 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
       required: ["busqueda"]
     }
-  }]
-}));
+  }
+];
 
-// Ejecución de la Herramienta
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "consultar_producto") {
-    const query = (request.params.arguments?.busqueda || '').toLowerCase();
-    
-    if (!doc) {
-      return { content: [{ type: "text", text: "Error: No hay conexión con la base de datos." }] };
+// Función para consultar productos en la planilla
+async function buscarProducto(query) {
+  if (!doc) return [];
+  await doc.loadInfo();
+  const sheet = doc.sheetsByIndex[0];
+  const rows = await sheet.getRows();
+  const q = (query || '').toLowerCase();
+
+  return rows.filter(row => {
+    const descrip = (row.get('descrip') || '').toLowerCase();
+    const sku = (row.get('sku') || '').toString().toLowerCase();
+    const barras = (row.get('barras') || '').toString().toLowerCase();
+    return descrip.includes(q) || sku.includes(q) || barras.includes(q);
+  }).map(row => ({
+    sku: row.get('sku'),
+    barras: row.get('barras'),
+    descripcion: row.get('descrip'),
+    precio: row.get('precio'),
+    stock: row.get('stock')
+  })).slice(0, 5);
+}
+
+// CORS Middleware para permitir conexiones desde Botmaker
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
+// Manejo unificado de peticiones MCP (Handshake, List Tools y Call Tool)
+const responderMCP = async (req, res) => {
+  const body = req.body || {};
+  const method = body.method;
+  const id = body.id || 1;
+
+  // 1. Ejecución de la herramienta
+  if (method === "tools/call") {
+    try {
+      const busqueda = body.params?.arguments?.busqueda || "";
+      const resultados = await buscarProducto(busqueda);
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{ type: "text", text: JSON.stringify(resultados) }]
+        }
+      });
+    } catch (err) {
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32603, message: err.message }
+      });
     }
-
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
-    const rows = await sheet.getRows();
-
-    const resultados = rows.filter(row => {
-      const descrip = (row.get('descrip') || '').toLowerCase();
-      const sku = (row.get('sku') || '').toString().toLowerCase();
-      const barras = (row.get('barras') || '').toString().toLowerCase();
-      return descrip.includes(query) || sku.includes(query) || barras.includes(query);
-    }).map(row => ({
-      sku: row.get('sku'),
-      barras: row.get('barras'),
-      descripcion: row.get('descrip'),
-      precio: row.get('precio'),
-      stock: row.get('stock')
-    }));
-
-    return {
-      content: [{ type: "text", text: JSON.stringify(resultados.slice(0, 5)) }]
-    };
   }
-});
 
-// Almacenamiento de sesiones SSE activas
-const transports = new Map();
-
-// Endpoint SSE principal para Botmaker
-app.get("/sse", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Content-Type", "text/event-stream");
-
-  const transport = new SSEServerTransport("/messages", res);
-  const sessionId = transport.sessionId;
-  transports.set(sessionId, transport);
-
-  req.on("close", () => {
-    transports.delete(sessionId);
+  // 2. Handshake / Descubrimiento de Herramientas
+  return res.json({
+    jsonrpc: "2.0",
+    id,
+    result: {
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      tools: TOOLS_DEFINITION,
+      serverInfo: { name: "mcp-sheets-farmacia", version: "1.0.0" }
+    }
   });
+};
 
-  await server.connect(transport);
-});
+// Rutas compatibles con cualquier endpoint que consulte Botmaker
+app.all(["/", "/sse", "/messages", "/mcp"], responderMCP);
 
-// Endpoint POST para mensajes vinculados a la sesión
-app.post("/messages", express.json(), async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  
-  const sessionId = req.query.sessionId;
-  let transport = transports.get(sessionId);
-
-  // Fallback de respaldo por si no viene el ID en la Query
-  if (!transport && transports.size > 0) {
-    transport = Array.from(transports.values())[transports.size - 1];
-  }
-
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send("Sesión no encontrada");
-  }
-});
-
-// Endpoint de prueba rápida
-app.get("/", (req, res) => res.send("OK"));
-
-app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Servidor MCP listo en puerto ${PORT}`));
