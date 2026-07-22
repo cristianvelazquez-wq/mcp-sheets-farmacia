@@ -29,43 +29,86 @@ try {
   console.error("Error al cargar credenciales de Google Sheets:", e);
 }
 
-// Estructura de herramientas para el protocolo MCP
+// CACHÉ EN MEMORIA (Actualiza filas cada 2 minutos para máxima velocidad)
+let cachedRows = null;
+let lastFetchTime = 0;
+const CACHE_DURATION = 2 * 60 * 1000; // 2 minutos
+
+async function obtenerFilasActualizadas() {
+  const ahora = Date.now();
+  if (!cachedRows || (ahora - lastFetchTime) > CACHE_DURATION) {
+    if (!doc) return [];
+    await doc.loadInfo();
+    const sheet = doc.sheetsByIndex[0];
+    cachedRows = await sheet.getRows();
+    lastFetchTime = ahora;
+    console.log(`[CACHÉ ACTUALIZADA] Se cargaron ${cachedRows.length} filas desde Google Sheets.`);
+  }
+  return cachedRows;
+}
+
+// Estructura de herramientas MCP
 const TOOLS_DEFINITION = [
   {
     name: "consultar_producto",
-    description: "Busca productos en la planilla. Pásale palabras clave principales, marca o SKU.",
+    description: "Busca productos en la planilla de la farmacia por descripción, marca, o SKU.",
     inputSchema: {
       type: "object",
       properties: {
-        busqueda: { type: "string", description: "Palabras clave del producto (ej: 'hipoglos', 'ibupirac', '38801')" }
+        busqueda: { type: "string", description: "Palabras clave del producto (ej: 'crema cerave', 'ibupirac 600', '38801')" }
       },
       required: ["busqueda"]
     }
   }
 ];
 
-// Función para normalizar texto (quita tildes y convierte caracteres especiales en espacios)
+// DICCIONARIO DE ABREVIATURAS Y SINÓNIMOS
+const DICCIONARIO = {
+  "crema": "cr",
+  "cremas": "cr",
+  "hidratante": "hidra",
+  "hidratantes": "hidra",
+  "humectante": "hidra",
+  "comprimidos": "comp",
+  "comprimido": "comp",
+  "pastillas": "comp",
+  "pastilla": "comp",
+  "locion": "loc",
+  "limpiador": "limp",
+  "gel": "gel",
+  "solucion": "sol",
+  "jarabe": "jbe",
+  "capsulas": "cap"
+};
+
+// Función para normalizar texto
 function normalizar(texto) {
   return (texto || '')
     .toString()
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // Quita tildes
-    .replace(/[^a-z0-9\s]/g, " ");   // Reemplaza símbolos por espacios
+    .replace(/[^a-z0-9\s]/g, " ");   // Símbolos a espacios
 }
 
-// Búsqueda inteligente por sistema de puntaje (Relevancia)
+// Búsqueda Inteligente Avanzada
 async function buscarProducto(query) {
-  if (!doc) return [];
-  await doc.loadInfo();
-  const sheet = doc.sheetsByIndex[0];
-  const rows = await sheet.getRows();
-  
+  const rows = await obtenerFilasActualizadas();
+  if (!rows || rows.length === 0) return [];
+
   const qNormalizado = normalizar(query);
-  // Permitimos letras sueltas como la "X" o números
-  const palabrasBusqueda = qNormalizado.split(/\s+/).filter(p => p.length > 0);
-  
-  if (palabrasBusqueda.length === 0) return [];
+  let palabrasOriginales = qNormalizado.split(/\s+/).filter(p => p.length > 0);
+
+  if (palabrasOriginales.length === 0) return [];
+
+  // Expandir palabras clave con el Diccionario
+  const palabrasBusqueda = new Set();
+  for (const p of palabrasOriginales) {
+    palabrasBusqueda.add(p);
+    if (DICCIONARIO[p]) {
+      palabrasBusqueda.add(DICCIONARIO[p]); // Agrega 'cr' si la palabra era 'crema'
+    }
+  }
 
   const resultadosConPuntaje = [];
 
@@ -73,29 +116,35 @@ async function buscarProducto(query) {
     const descrip = normalizar(row.get('descrip'));
     const sku = normalizar(row.get('sku'));
     const barras = normalizar(row.get('barras'));
+    const stock = parseInt(row.get('stock') || '0', 10);
 
-    // 1. Coincidencia directa por SKU o Código de Barras (Prioridad Alta)
+    // 1. Coincidencia directa por SKU o Código de Barras
     if ((sku && sku.includes(qNormalizado)) || (barras && barras.includes(qNormalizado))) {
-      resultadosConPuntaje.push({ row, score: 1000 });
+      resultadosConPuntaje.push({ row, score: 2000, stock });
       continue;
     }
 
-    // 2. Cálculo de coincidencia por palabras clave
+    // 2. Sistema de puntuación
     let score = 0;
     for (const palabra of palabrasBusqueda) {
       if (descrip.includes(palabra)) {
-        score += 10; // Suma puntos si encuentra la palabra exacta
+        score += 15;
       } else if (palabra.length > 3 && descrip.includes(palabra.substring(0, 4))) {
-        score += 5;  // Suma puntos si coincide el inicio (ej: "hidra" en "hidratante")
+        score += 5;
       }
     }
 
+    // Si tiene stock disponible, sumamos un bono de prioridad
+    if (score > 0 && stock > 0) {
+      score += 50;
+    }
+
     if (score > 0) {
-      resultadosConPuntaje.push({ row, score });
+      resultadosConPuntaje.push({ row, score, stock });
     }
   }
 
-  // Ordena por mayor relevancia y devuelve los 10 mejores
+  // Ordenar por mayor puntaje
   return resultadosConPuntaje
     .sort((a, b) => b.score - a.score)
     .slice(0, 10)
@@ -108,7 +157,7 @@ async function buscarProducto(query) {
     }));
 }
 
-// Handler universal que responde a SSE y HTTP
+// Handler universal MCP
 const handleRequest = async (req, res) => {
   console.log(`[PETICIÓN RECIBIDA] ${req.method} en ${req.url}`);
   if (req.body) {
@@ -150,7 +199,7 @@ const handleRequest = async (req, res) => {
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
       tools: TOOLS_DEFINITION,
-      serverInfo: { name: "mcp-sheets-farmacia", version: "1.0.0" }
+      serverInfo: { name: "mcp-sheets-farmacia", version: "1.1.0" }
     }
   });
 };
