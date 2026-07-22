@@ -44,17 +44,17 @@ const TOOLS_DEFINITION = [
   }
 ];
 
-// Función para normalizar texto (quita tildes y caracteres especiales)
+// Función para normalizar texto (quita tildes y convierte caracteres especiales en espacios)
 function normalizar(texto) {
   return (texto || '')
     .toString()
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // Quita tildes
-    .replace(/[^a-z0-9\s]/g, "");   // Quita puntos, comas, etc.
+    .replace(/[^a-z0-9\s]/g, " ");   // Reemplaza símbolos por espacios
 }
 
-// Búsqueda inteligente y dinámica
+// Búsqueda inteligente por sistema de puntaje (Relevancia)
 async function buscarProducto(query) {
   if (!doc) return [];
   await doc.loadInfo();
@@ -62,29 +62,50 @@ async function buscarProducto(query) {
   const rows = await sheet.getRows();
   
   const qNormalizado = normalizar(query);
-  const palabrasBusqueda = qNormalizado.split(/\s+/).filter(p => p.length > 1);
+  // Permitimos letras sueltas como la "X" o números
+  const palabrasBusqueda = qNormalizado.split(/\s+/).filter(p => p.length > 0);
   
   if (palabrasBusqueda.length === 0) return [];
 
-  return rows.filter(row => {
+  const resultadosConPuntaje = [];
+
+  for (const row of rows) {
     const descrip = normalizar(row.get('descrip'));
     const sku = normalizar(row.get('sku'));
     const barras = normalizar(row.get('barras'));
 
-    // 1. Si coincide el SKU o Código de Barras
-    if (sku.includes(qNormalizado) || barras.includes(qNormalizado)) {
-      return true;
+    // 1. Coincidencia directa por SKU o Código de Barras (Prioridad Alta)
+    if ((sku && sku.includes(qNormalizado)) || (barras && barras.includes(qNormalizado))) {
+      resultadosConPuntaje.push({ row, score: 1000 });
+      continue;
     }
 
-    // 2. Coincidencia dinámica: si al menos una de las palabras principales está en la descripción
-    return palabrasBusqueda.some(palabra => descrip.includes(palabra));
-  }).map(row => ({
-    sku: row.get('sku'),
-    barras: row.get('barras'),
-    descripcion: row.get('descrip'),
-    precio: row.get('precio'),
-    stock: row.get('stock')
-  })).slice(0, 5); // Devuelve hasta 5 opciones para que la IA elija la mejor
+    // 2. Cálculo de coincidencia por palabras clave
+    let score = 0;
+    for (const palabra of palabrasBusqueda) {
+      if (descrip.includes(palabra)) {
+        score += 10; // Suma puntos si encuentra la palabra exacta
+      } else if (palabra.length > 3 && descrip.includes(palabra.substring(0, 4))) {
+        score += 5;  // Suma puntos si coincide el inicio (ej: "hidra" en "hidratante")
+      }
+    }
+
+    if (score > 0) {
+      resultadosConPuntaje.push({ row, score });
+    }
+  }
+
+  // Ordena por mayor relevancia y devuelve los 10 mejores
+  return resultadosConPuntaje
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
+    .map(({ row }) => ({
+      sku: row.get('sku'),
+      barras: row.get('barras'),
+      descripcion: row.get('descrip'),
+      precio: row.get('precio'),
+      stock: row.get('stock')
+    }));
 }
 
 // Handler universal que responde a SSE y HTTP
