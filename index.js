@@ -29,15 +29,17 @@ try {
   console.error("Error al cargar credenciales de Google Sheets:", e);
 }
 
-// CACHÉ EN MEMORIA (Actualiza filas cada 2 minutos para máxima velocidad)
+// CACHÉ EN MEMORIA
+// Aumentado a 15 minutos para evitar recargas constantes con 40k+ filas
 let cachedRows = null;
 let lastFetchTime = 0;
-const CACHE_DURATION = 2 * 60 * 1000; // 2 minutos
+const CACHE_DURATION = 15 * 60 * 1000; 
 
 async function obtenerFilasActualizadas() {
   const ahora = Date.now();
   if (!cachedRows || (ahora - lastFetchTime) > CACHE_DURATION) {
     if (!doc) return [];
+    console.log("[CACHÉ] Cargando/actualizando filas desde Google Sheets...");
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[0];
     cachedRows = await sheet.getRows();
@@ -144,10 +146,10 @@ async function buscarProducto(query) {
     }
   }
 
-  // Ordenar por mayor puntaje
+  // Ordenar por mayor puntaje y recortar a las 5 mejores coincidencias para mayor velocidad
   return resultadosConPuntaje
     .sort((a, b) => b.score - a.score)
-    .slice(0, 10)
+    .slice(0, 5)
     .map(({ row }) => ({
       sku: row.get('sku'),
       barras: row.get('barras'),
@@ -172,6 +174,18 @@ const handleRequest = async (req, res) => {
   const method = body.method;
   const id = body.id !== undefined ? body.id : 1;
 
+  // Endpoint para listar herramientas
+  if (method === "tools/list") {
+    return res.json({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: TOOLS_DEFINITION
+      }
+    });
+  }
+
+  // Endpoint para ejecutar llamadas a herramientas
   if (method === "tools/call") {
     try {
       const busqueda = body.params?.arguments?.busqueda || "";
@@ -192,6 +206,7 @@ const handleRequest = async (req, res) => {
     }
   }
 
+  // Respuesta general (inicialización o ping)
   return res.json({
     jsonrpc: "2.0",
     id,
@@ -206,4 +221,13 @@ const handleRequest = async (req, res) => {
 
 app.use("*", handleRequest);
 
-app.listen(PORT, () => console.log(`Servidor MCP listo en puerto ${PORT}`));
+// Inicialización de servidor + Warm-up
+app.listen(PORT, async () => {
+  console.log(`Servidor MCP listo en puerto ${PORT}`);
+  try {
+    console.log("[INICIALIZACIÓN] Precargando Google Sheets para evitar timeouts en la primera llamada...");
+    await obtenerFilasActualizadas();
+  } catch (err) {
+    console.error("[ERROR EN PRECARGA INITIAL]", err);
+  }
+});
